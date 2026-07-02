@@ -1,0 +1,17 @@
+[project]
+name = "fednarrativealpha"
+version = "0.1.0"
+description = "FedNarrativeAlpha: GenAI-Assisted Alpha Research Pipeline for Liquid ETF Markets"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Yousef Nejatbakhsh" }
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
