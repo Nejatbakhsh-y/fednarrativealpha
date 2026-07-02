@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data files
+data/raw/
+data/interim/
+*.csv
+*.xlsx
+*.parquet
+*.pkl
+
+# Keep processed documentation outputs only if needed
+!data/processed/.gitkeep
+
+# Reports and figures can be tracked selectively
+reports/temp/
+reports/cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code local settings
+.vscode/settings.local.json
