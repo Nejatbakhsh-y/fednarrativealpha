@@ -1,0 +1,60 @@
+project:
+  name: FedNarrativeAlpha
+  version: 0.1.0
+  description: GenAI-Assisted Alpha Research Pipeline for Liquid ETF Markets
+
+data:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+
+market_data:
+  universe:
+    - SPY
+    - QQQ
+    - IWM
+    - TLT
+    - HYG
+    - LQD
+    - GLD
+    - XLF
+    - XLK
+    - XLE
+  start_date: "2010-01-01"
+  end_date: null
+
+macro_data:
+  fred_series:
+    - FEDFUNDS
+    - CPIAUCSL
+    - UNRATE
+    - DGS10
+    - DGS2
+    - VIXCLS
+
+features:
+  return_windows:
+    - 1
+    - 5
+    - 21
+    - 63
+  volatility_windows:
+    - 21
+    - 63
+  random_seed: 42
+
+modeling:
+  target_horizon_days: 21
+  walk_forward_splits: 5
+  test_size_days: 252
+
+backtest:
+  initial_capital: 100000
+  transaction_cost_bps: 5
+  max_position_weight: 0.25
+  max_turnover: 0.50
+
+reports:
+  figures_dir: reports/figures
+  tables_dir: reports/tables
+  results_dir: results
