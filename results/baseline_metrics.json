@@ -1,0 +1,116 @@
+{
+  "created_at_utc": "2026-07-03T02:34:30.217499+00:00",
+  "input_path": "data\\processed\\master_modeling_dataset.parquet",
+  "target": "next_1m_return",
+  "rank_target": "next_1m_rank",
+  "top_tercile_target": "top_tercile_next_month",
+  "min_train_months": 60,
+  "evaluation_start_month": "2015-01-31",
+  "evaluation_end_month": "2026-06-30",
+  "feature_sets": {
+    "momentum_signal": "momentum_12m_minus_1m",
+    "reversal_signal": "return_1m",
+    "low_volatility_signal": "realized_vol_63d",
+    "macro_features": [
+      "rate_level",
+      "rate_change_1m",
+      "rate_change_3m",
+      "yield_curve_slope",
+      "inflation_momentum",
+      "unemployment_change",
+      "credit_spread_level",
+      "credit_spread_change",
+      "vix_level",
+      "vix_change",
+      "financial_conditions_level",
+      "financial_conditions_change",
+      "fed_similarity_to_inflation_theme"
+    ],
+    "price_features": [
+      "return_1m",
+      "return_3m",
+      "return_6m",
+      "return_12m",
+      "momentum_12m_minus_1m",
+      "realized_vol_21d",
+      "realized_vol_63d",
+      "realized_vol_126d",
+      "max_drawdown_6m",
+      "volume_change_3m",
+      "dollar_volume",
+      "price_above_200d_ma",
+      "inflation_momentum",
+      "fed_similarity_to_labor_market_theme"
+    ]
+  },
+  "metrics": {
+    "equal_weight": {
+      "information_coefficient": null,
+      "rank_ic": null,
+      "directional_accuracy": 0.5830546265328874,
+      "top_tercile_precision": 0.38461538461538464,
+      "mean_absolute_error": 0.03054036413018179,
+      "hit_rate": 0.5819397993311036,
+      "n_observations": 1794,
+      "n_months": 138
+    },
+    "previous_12m_momentum": {
+      "information_coefficient": 0.04704277466344674,
+      "rank_ic": 0.021102086319477624,
+      "directional_accuracy": 0.5451505016722408,
+      "top_tercile_precision": 0.41304347826086957,
+      "mean_absolute_error": 0.1238045967518557,
+      "hit_rate": 0.5869565217391305,
+      "n_observations": 1794,
+      "n_months": 138
+    },
+    "previous_1m_reversal": {
+      "information_coefficient": -0.020700760557541054,
+      "rank_ic": -0.028308647873865268,
+      "directional_accuracy": 0.47491638795986624,
+      "top_tercile_precision": 0.3652173913043478,
+      "mean_absolute_error": 0.043793739852033095,
+      "hit_rate": 0.5710144927536231,
+      "n_observations": 1794,
+      "n_months": 138
+    },
+    "low_volatility": {
+      "information_coefficient": -0.09656668819473972,
+      "rank_ic": -0.1001353718745023,
+      "directional_accuracy": 0.4169453734671126,
+      "top_tercile_precision": 0.29999999999999993,
+      "mean_absolute_error": 0.14648843799407663,
+      "hit_rate": 0.5753623188405798,
+      "n_observations": 1794,
+      "n_months": 138
+    },
+    "macro_only_ridge": {
+      "information_coefficient": 0.1063935092338097,
+      "rank_ic": 0.10053352444656793,
+      "directional_accuracy": 0.5808249721293199,
+      "top_tercile_precision": 0.45942028985507244,
+      "mean_absolute_error": 0.03301911774952743,
+      "hit_rate": 0.6115942028985508,
+      "n_observations": 1794,
+      "n_months": 138
+    },
+    "price_only_random_forest": {
+      "information_coefficient": 0.0739997399986692,
+      "rank_ic": 0.048216276477146054,
+      "directional_accuracy": 0.540133779264214,
+      "top_tercile_precision": 0.43043478260869567,
+      "mean_absolute_error": 0.03142838066740503,
+      "hit_rate": 0.5840579710144927,
+      "n_observations": 1794,
+      "n_months": 138
+    }
+  },
+  "metric_definitions": {
+    "information_coefficient": "Average monthly Pearson correlation between predicted score and next-month return.",
+    "rank_ic": "Average monthly Spearman rank correlation between predicted score and next-month return.",
+    "directional_accuracy": "Row-level share of observations where predicted and realized returns have the same sign.",
+    "top_tercile_precision": "Average monthly share of predicted top-tercile names that are actually in the realized top tercile.",
+    "mean_absolute_error": "Mean absolute error between predicted score/return and next-month return.",
+    "hit_rate": "Average monthly share of selected predicted top-tercile names with positive next-month return."
+  }
+}
