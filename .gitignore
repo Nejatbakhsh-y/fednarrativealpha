@@ -1,41 +1,117 @@
-# Python
+# ============================================================
+# Python cache and build artifacts
+# ============================================================
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.so
+
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 
-# Virtual environment
+build/
+dist/
+*.egg-info/
+
+
+# ============================================================
+# Virtual environments
+# ============================================================
 .venv/
 venv/
 env/
 
-# Environment variables
-.env
 
+# ============================================================
+# Environment variables and secrets
+# ============================================================
+.env
+.env.*
+!.env.example
+
+
+# ============================================================
 # Jupyter
+# ============================================================
 .ipynb_checkpoints/
 
-# Data files
-data/raw/
-data/interim/
-*.csv
-*.xlsx
-*.parquet
-*.pkl
 
-# Keep processed documentation outputs only if needed
+# ============================================================
+# Project data outputs
+# Keep directory structure, but do not track large/generated data
+# ============================================================
+data/raw/*
+data/interim/*
+data/processed/*
+
+!data/raw/.gitkeep
+!data/interim/.gitkeep
 !data/processed/.gitkeep
 
-# Reports and figures can be tracked selectively
+
+# ============================================================
+# Generated model and prediction artifacts
+# ============================================================
+results/*.parquet
+results/*predictions*
+results/*forecast*
+results/*backtest_positions*
+results/*portfolio_weights*
+
+# Explicit generated artifact from Step 10
+results/baseline_predictions.parquet
+
+
+# ============================================================
+# Allow lightweight result summaries to be tracked
+# ============================================================
+!results/baseline_metrics.json
+!results/selected_features.csv
+!results/*.json
+!results/*.csv
+!results/*.md
+
+
+# ============================================================
+# Reports, figures, and temporary report caches
+# ============================================================
 reports/temp/
 reports/cache/
 
+# Track final report files and figures unless they are very large
+!reports/
+!reports/figures/
+!reports/final/
+
+
+# ============================================================
+# Local notebooks or temporary scratch files
+# ============================================================
+notebooks/.ipynb_checkpoints/
+scratch/
+tmp/
+temp/
+
+
+# ============================================================
+# Logs
+# ============================================================
+*.log
+logs/
+
+
+# ============================================================
 # OS files
+# ============================================================
 .DS_Store
 Thumbs.db
 
+
+# ============================================================
 # VS Code local settings
+# ============================================================
 .vscode/settings.local.json
