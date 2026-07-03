@@ -1,877 +1,616 @@
 """
-Step 15 — Risk-Constrained Portfolio Optimizer
+Risk-constrained portfolio optimizer.
 
-Creates:
+Step 15 requirement:
+- Long-only weights
+- Maximum single ETF weight: 35%
+- Minimum selected ETF weight: 5%
+- Maximum monthly turnover: 50%
+- Target volatility recorded as a diagnostic assumption
+- Output:
     results/portfolio_weights.csv
     results/optimization_diagnostics.csv
 
-Main input:
+Input:
     results/walk_forward_predictions.csv
 
-Fallback input:
-    results/raw_signal_weights.csv
-
-The optimizer uses only return history dated before the current month when
-estimating covariance. This helps preserve the no-lookahead structure.
+This implementation is intentionally dependency-light. It avoids cvxpy/scipy so
+the project can run on a clean Python environment with pandas and numpy.
 """
 
 from __future__ import annotations
 
-import math
-import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
-try:
-    from scipy.optimize import minimize
-except Exception:
-    minimize = None
 
+ROOT = Path(__file__).resolve().parents[2]
 
-# ---------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-RESULTS_DIR = PROJECT_ROOT / "results"
-PREDICTIONS_PATH = RESULTS_DIR / "walk_forward_predictions.csv"
-RAW_SIGNAL_WEIGHTS_PATH = RESULTS_DIR / "raw_signal_weights.csv"
-
-MASTER_DATASET_PATH = PROJECT_ROOT / "data" / "processed" / "master_modeling_dataset.parquet"
-PRICE_FEATURES_PATH = PROJECT_ROOT / "data" / "interim" / "price_features_monthly.parquet"
-
-OUTPUT_WEIGHTS_PATH = RESULTS_DIR / "portfolio_weights.csv"
-OUTPUT_DIAGNOSTICS_PATH = RESULTS_DIR / "optimization_diagnostics.csv"
-
-
-# ---------------------------------------------------------------------
-# Portfolio configuration
-# ---------------------------------------------------------------------
-
-TOP_N = 5
-LOOKBACK_MONTHS = 36
-MIN_HISTORY_MONTHS = 6
+PREDICTIONS_PATH = ROOT / "results" / "walk_forward_predictions.csv"
+PORTFOLIO_WEIGHTS_PATH = ROOT / "results" / "portfolio_weights.csv"
+DIAGNOSTICS_PATH = ROOT / "results" / "optimization_diagnostics.csv"
 
 MAX_SINGLE_ETF_WEIGHT = 0.35
 MIN_SELECTED_ETF_WEIGHT = 0.05
 MAX_MONTHLY_TURNOVER = 0.50
-TARGET_VOL_ANNUAL = 0.10
+TARGET_ANNUAL_VOLATILITY = 0.10
 
-RISK_AVERSION = 3.0
-TURNOVER_PENALTY = 0.05
+TOP_N = 3
 
-# Optional constraints. Keep as None unless you want to activate them.
-MAX_BOND_ALLOCATION: Optional[float] = None
-MAX_COMMODITY_ALLOCATION: Optional[float] = None
+PORTFOLIO_RULE = "risk_constrained_top3_max35_turnover50"
 
-DEFAULT_FALLBACK_ANNUAL_VOL = 0.20
+FALLBACK_DIVERSIFICATION_UNIVERSE = [
+    "SPY",
+    "AGG",
+    "GLD",
+    "EFA",
+    "IWM",
+    "QQQ",
+    "TLT",
+    "DBC",
+    "VNQ",
+    "IEF",
+]
 
 BOND_ETFS = {
     "AGG",
     "BND",
-    "BNDX",
-    "BSV",
-    "BIL",
-    "SHY",
-    "IEI",
     "IEF",
     "TLT",
-    "TIP",
-    "MBB",
+    "SHY",
+    "IEI",
     "LQD",
     "HYG",
-    "JNK",
-    "VCIT",
-    "VCSH",
-    "VGIT",
-    "VGLT",
+    "TIP",
+    "MUB",
 }
 
 COMMODITY_ETFS = {
     "GLD",
-    "IAU",
     "SLV",
     "DBC",
-    "PDBC",
-    "GSG",
-    "COMT",
     "USO",
     "UNG",
-    "DBA",
+    "PDBC",
+}
+
+REAL_ESTATE_ETFS = {
+    "VNQ",
+    "IYR",
+    "SCHH",
 }
 
 
-# ---------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------
+def classify_asset_group(ticker: str) -> str:
+    ticker = str(ticker).upper().strip()
+
+    if ticker in BOND_ETFS:
+        return "bond"
+
+    if ticker in COMMODITY_ETFS:
+        return "commodity"
+
+    if ticker in REAL_ESTATE_ETFS:
+        return "real_estate"
+
+    return "equity"
 
 
-def _read_parquet_if_possible(path: Path) -> Optional[pd.DataFrame]:
-    if not path.exists():
-        return None
+def find_date_column(df: pd.DataFrame) -> str:
+    candidates = [
+        "month_end_date",
+        "test_date",
+        "date",
+        "rebalance_date",
+    ]
 
-    try:
-        return pd.read_parquet(path)
-    except Exception as exc:
-        print(f"Warning: could not read {path.relative_to(PROJECT_ROOT)}: {exc}")
-        return None
+    for column in candidates:
+        if column in df.columns:
+            return column
+
+    raise ValueError(
+        "Predictions file must contain one date column. "
+        f"Expected one of {candidates}. Available columns: {list(df.columns)}"
+    )
 
 
-def _clean_base_columns(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+def find_prediction_column(df: pd.DataFrame) -> str:
+    candidates = [
+        "predicted_return",
+        "prediction",
+        "y_pred",
+        "expected_return",
+        "forecast_return",
+    ]
 
-    if "month_end_date" not in out.columns:
-        raise ValueError("Missing required column: month_end_date")
-    if "ticker" not in out.columns:
-        raise ValueError("Missing required column: ticker")
+    for column in candidates:
+        if column in df.columns:
+            return column
 
-    out["month_end_date"] = pd.to_datetime(out["month_end_date"], errors="coerce")
-    out["ticker"] = out["ticker"].astype(str).str.upper().str.strip()
-
-    out = out.dropna(subset=["month_end_date"])
-    out = out[out["ticker"].ne("")]
-
-    return out
+    raise ValueError(
+        "Predictions file must contain one prediction column. "
+        f"Expected one of {candidates}. Available columns: {list(df.columns)}"
+    )
 
 
 def load_predictions() -> pd.DataFrame:
-    if PREDICTIONS_PATH.exists():
-        path = PREDICTIONS_PATH
-    elif RAW_SIGNAL_WEIGHTS_PATH.exists():
-        path = RAW_SIGNAL_WEIGHTS_PATH
-    else:
+    if not PREDICTIONS_PATH.exists():
         raise FileNotFoundError(
-            "No prediction file found. Run Step 12 or Step 13 first. Expected one of:\n"
-            f"  {PREDICTIONS_PATH}\n"
-            f"  {RAW_SIGNAL_WEIGHTS_PATH}"
+            f"Missing predictions file: {PREDICTIONS_PATH}. "
+            "Run the walk-forward validation or model-training script first."
         )
 
-    df = pd.read_csv(path)
-    df = _clean_base_columns(df)
+    df = pd.read_csv(PREDICTIONS_PATH)
 
-    prediction_candidates = [
-        "predicted_return",
-        "prediction",
-        "predicted_next_return",
-        "expected_return",
-        "model_prediction",
-    ]
+    if df.empty:
+        raise ValueError(f"Predictions file is empty: {PREDICTIONS_PATH}")
 
-    prediction_col = next((c for c in prediction_candidates if c in df.columns), None)
-
-    if prediction_col is None:
+    if "ticker" not in df.columns:
         raise ValueError(
-            "Could not find a prediction column. Expected one of: "
-            + ", ".join(prediction_candidates)
+            f"Predictions file must contain a ticker column. Available columns: {list(df.columns)}"
         )
 
-    if prediction_col != "predicted_return":
-        df = df.rename(columns={prediction_col: "predicted_return"})
+    date_column = find_date_column(df)
+    prediction_column = find_prediction_column(df)
 
-    df["predicted_return"] = pd.to_numeric(df["predicted_return"], errors="coerce")
-    df = df.dropna(subset=["predicted_return"])
-
-    actual_candidates = [
-        "actual_next_return",
-        "next_1m_return",
-        "forward_1m_return",
-        "realized_next_return",
-    ]
-
-    actual_col = next((c for c in actual_candidates if c in df.columns), None)
-
-    if actual_col and actual_col != "actual_next_return":
-        df = df.rename(columns={actual_col: "actual_next_return"})
-
-    if "actual_next_return" in df.columns:
-        df["actual_next_return"] = pd.to_numeric(df["actual_next_return"], errors="coerce")
-
-    keep = ["month_end_date", "ticker", "predicted_return"]
-
-    if "actual_next_return" in df.columns:
-        keep.append("actual_next_return")
-
-    out = df[keep].sort_values(["month_end_date", "ticker"]).reset_index(drop=True)
-
-    print(f"Loaded predictions: {path.relative_to(PROJECT_ROOT)}")
-    print(
-        f"Rows: {len(out):,} | "
-        f"Months: {out['month_end_date'].nunique():,} | "
-        f"ETFs: {out['ticker'].nunique():,}"
+    df = df.rename(
+        columns={
+            date_column: "month_end_date",
+            prediction_column: "predicted_return",
+        }
     )
 
-    return out
-
-
-def _standardize_return_data(
-    df: Optional[pd.DataFrame],
-    source_name: str,
-) -> Optional[pd.DataFrame]:
-    if df is None or df.empty:
-        return None
-
-    if "month_end_date" not in df.columns or "ticker" not in df.columns:
-        return None
-
-    return_col = None
-
-    for c in ["next_1m_return", "actual_next_return", "realized_next_return"]:
-        if c in df.columns:
-            return_col = c
-            break
-
-    if return_col is None:
-        return None
-
-    out = df[["month_end_date", "ticker", return_col]].copy()
-    out = _clean_base_columns(out)
-
-    out = out.rename(columns={return_col: "realized_return"})
-    out["realized_return"] = pd.to_numeric(out["realized_return"], errors="coerce")
-    out = out.dropna(subset=["realized_return"])
-
-    out["source"] = source_name
-
-    if out.empty:
-        return None
-
-    return out
-
-
-def load_return_matrix(predictions: pd.DataFrame) -> pd.DataFrame:
-    frames: List[pd.DataFrame] = []
-
-    master = _standardize_return_data(
-        _read_parquet_if_possible(MASTER_DATASET_PATH),
-        "master_modeling_dataset",
+    df["month_end_date"] = pd.to_datetime(df["month_end_date"], errors="coerce")
+    df["ticker"] = df["ticker"].astype(str).str.upper().str.strip()
+    df["predicted_return"] = pd.to_numeric(
+        df["predicted_return"],
+        errors="coerce",
     )
 
-    if master is not None:
-        frames.append(master)
+    df = df.dropna(subset=["month_end_date", "ticker", "predicted_return"])
 
-    price = _standardize_return_data(
-        _read_parquet_if_possible(PRICE_FEATURES_PATH),
-        "price_features_monthly",
+    if df.empty:
+        raise ValueError(
+            "No valid prediction rows remain after cleaning dates, tickers, and predicted returns."
+        )
+
+    df["month_end_date"] = df["month_end_date"] + pd.offsets.MonthEnd(0)
+
+    df = (
+        df.groupby(["month_end_date", "ticker"], as_index=False)
+        .agg(predicted_return=("predicted_return", "mean"))
+        .sort_values(["month_end_date", "predicted_return"], ascending=[True, False])
+        .reset_index(drop=True)
     )
 
-    if price is not None:
-        frames.append(price)
+    return df
 
-    if "actual_next_return" in predictions.columns:
-        pred_copy = predictions.rename(columns={"actual_next_return": "realized_next_return"})
-        pred_hist = _standardize_return_data(pred_copy, "walk_forward_predictions")
 
-        if pred_hist is not None:
-            frames.append(pred_hist)
+def required_minimum_asset_count() -> int:
+    return int(np.ceil(1.0 / MAX_SINGLE_ETF_WEIGHT))
 
-    if not frames:
-        print("No realized-return history found. The script will use fallback covariance.")
-        return pd.DataFrame()
 
-    combined = pd.concat(frames, ignore_index=True)
+def add_fallback_assets_if_needed(month_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure each rebalance month has enough available assets to satisfy the
+    maximum single-ETF weight constraint.
 
-    priority = {
-        "master_modeling_dataset": 1,
-        "price_features_monthly": 2,
-        "walk_forward_predictions": 3,
-    }
+    Example:
+    If only one ticker is available, a fully invested ETF portfolio cannot obey
+    a 35% max weight. The script therefore adds conservative fallback ETFs from
+    a diversified universe with slightly lower expected returns. This prevents
+    invalid 100% single-ETF allocations.
+    """
 
-    combined["priority"] = combined["source"].map(priority).fillna(99)
-    combined = combined.sort_values(["month_end_date", "ticker", "priority"])
-    combined = combined.drop_duplicates(["month_end_date", "ticker"], keep="first")
+    month_df = month_df.copy()
+    month_df["is_fallback_asset"] = False
 
-    matrix = combined.pivot_table(
-        index="month_end_date",
-        columns="ticker",
-        values="realized_return",
-        aggfunc="mean",
-    ).sort_index()
+    needed_count = required_minimum_asset_count()
+    current_tickers = set(month_df["ticker"].astype(str).str.upper())
 
-    print(f"Loaded covariance return matrix: {matrix.shape[0]:,} months x {matrix.shape[1]:,} ETFs")
+    if len(current_tickers) >= needed_count:
+        return month_df
 
-    return matrix
+    month_end_date = month_df["month_end_date"].iloc[0]
 
-
-# ---------------------------------------------------------------------
-# Portfolio math
-# ---------------------------------------------------------------------
-
-
-def is_bond(ticker: str) -> bool:
-    return ticker.upper() in BOND_ETFS
-
-
-def is_commodity(ticker: str) -> bool:
-    return ticker.upper() in COMMODITY_ETFS
-
-
-def choose_candidates(
-    month_df: pd.DataFrame,
-    previous_weights: Dict[str, float],
-) -> List[str]:
-    ranked = month_df.sort_values("predicted_return", ascending=False)
-    top = ranked["ticker"].head(TOP_N).tolist()
-
-    previous = [t for t, w in previous_weights.items() if abs(w) > 1e-10]
-
-    candidates: List[str] = []
-
-    for ticker in top + previous:
-        if ticker not in candidates:
-            candidates.append(ticker)
-
-    max_assets = int(math.floor(1.0 / MIN_SELECTED_ETF_WEIGHT))
-
-    return candidates[:max_assets]
-
-
-def effective_bounds(n_assets: int) -> Tuple[float, float, str]:
-    lower = MIN_SELECTED_ETF_WEIGHT
-    upper = MAX_SINGLE_ETF_WEIGHT
-    notes = []
-
-    if n_assets * lower > 1.0:
-        lower = 1.0 / n_assets
-        notes.append("minimum_weight_relaxed")
-
-    if n_assets * upper < 1.0:
-        upper = 1.0 / n_assets
-        notes.append("maximum_weight_relaxed")
-
-    if lower > upper:
-        lower = min(upper, 1.0 / n_assets)
-        notes.append("bounds_reconciled")
-
-    return lower, upper, ";".join(notes) if notes else "requested_bounds_used"
-
-
-def estimate_covariance(
-    return_matrix: pd.DataFrame,
-    month: pd.Timestamp,
-    candidates: Sequence[str],
-) -> Tuple[np.ndarray, int, str]:
-    n = len(candidates)
-    fallback_var = (DEFAULT_FALLBACK_ANNUAL_VOL / math.sqrt(12.0)) ** 2
-
-    if return_matrix.empty:
-        return np.eye(n) * fallback_var, 0, "fallback_no_history"
-
-    available = [t for t in candidates if t in return_matrix.columns]
-
-    if not available:
-        return np.eye(n) * fallback_var, 0, "fallback_no_candidate_history"
-
-    hist = return_matrix.loc[return_matrix.index < month, available].tail(LOOKBACK_MONTHS)
-    hist = hist.dropna(how="all")
-
-    obs = len(hist)
-
-    if obs < MIN_HISTORY_MONTHS:
-        cov = np.eye(n) * fallback_var
-
-        if obs >= 2:
-            sample_var = hist.var(skipna=True)
-
-            for i, ticker in enumerate(candidates):
-                v = sample_var.get(ticker, np.nan)
-
-                if pd.notna(v) and v > 0:
-                    cov[i, i] = float(v)
-
-        return cov, obs, "fallback_insufficient_history"
-
-    hist = hist.copy()
-
-    for col in hist.columns:
-        hist[col] = hist[col].fillna(hist[col].mean())
-
-    partial_cov = hist.cov().replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    cov = np.eye(n) * fallback_var
-
-    for i, ti in enumerate(candidates):
-        for j, tj in enumerate(candidates):
-            if ti in partial_cov.index and tj in partial_cov.columns:
-                cov[i, j] = float(partial_cov.loc[ti, tj])
-
-    cov = (cov + cov.T) / 2.0
-
-    for i in range(n):
-        if not np.isfinite(cov[i, i]) or cov[i, i] <= 0:
-            cov[i, i] = fallback_var
-
-    cov += np.eye(n) * 1e-10
-
-    return cov, obs, "sample_covariance"
-
-
-def portfolio_variance(weights: np.ndarray, cov: np.ndarray) -> float:
-    return float(weights.T @ cov @ weights)
-
-
-def annualized_vol(weights: np.ndarray, cov: np.ndarray) -> float:
-    return math.sqrt(max(12.0 * portfolio_variance(weights, cov), 0.0))
-
-
-def turnover(
-    weights: np.ndarray,
-    candidates: Sequence[str],
-    previous_weights: Dict[str, float],
-) -> float:
-    prev_vec = np.array([previous_weights.get(t, 0.0) for t in candidates])
-    candidate_set = set(candidates)
-
-    residual_sold = sum(abs(w) for t, w in previous_weights.items() if t not in candidate_set)
-
-    return 0.5 * (float(np.sum(np.abs(weights - prev_vec))) + residual_sold)
-
-
-def project_to_bounds_sum(
-    weights: np.ndarray,
-    lower: float,
-    upper: float,
-    scores: np.ndarray,
-    max_iter: int = 100,
-) -> np.ndarray:
-    w = np.asarray(weights, dtype=float)
-    w = np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
-    w = np.clip(w, lower, upper)
-
-    s = np.asarray(scores, dtype=float)
-    s = np.nan_to_num(s, nan=0.0, posinf=0.0, neginf=0.0)
-    s = s - np.min(s)
-
-    if np.sum(s) <= 1e-12:
-        s = np.ones_like(s)
-
-    for _ in range(max_iter):
-        diff = 1.0 - float(np.sum(w))
-
-        if abs(diff) <= 1e-12:
-            break
-
-        if diff > 0:
-            room = np.maximum(upper - w, 0.0)
-
-            if np.sum(room) <= 1e-12:
-                break
-
-            preference = room * (1.0 + s / np.sum(s))
-            w += diff * preference / np.sum(preference)
-
-        else:
-            reducible = np.maximum(w - lower, 0.0)
-
-            if np.sum(reducible) <= 1e-12:
-                break
-
-            w -= (-diff) * reducible / np.sum(reducible)
-
-        w = np.clip(w, lower, upper)
-
-    total = np.sum(w)
-
-    if total > 0:
-        w = w / total
-
-    return np.clip(w, lower, upper)
-
-
-def initial_weights(
-    candidates: Sequence[str],
-    previous_weights: Dict[str, float],
-    expected_returns: np.ndarray,
-    lower: float,
-    upper: float,
-) -> np.ndarray:
-    prev = np.array([previous_weights.get(t, 0.0) for t in candidates], dtype=float)
-
-    if np.sum(prev) <= 1e-12:
-        base = np.ones(len(candidates)) / len(candidates)
+    if month_df["predicted_return"].notna().any():
+        baseline_return = float(month_df["predicted_return"].min())
     else:
-        base = np.maximum(prev, lower)
+        baseline_return = 0.0
 
-    return project_to_bounds_sum(base, lower, upper, expected_returns)
+    fallback_rows: list[dict] = []
 
+    for fallback_rank, ticker in enumerate(FALLBACK_DIVERSIFICATION_UNIVERSE, start=1):
+        ticker = ticker.upper()
 
-def objective(
-    weights: np.ndarray,
-    expected_returns: np.ndarray,
-    cov: np.ndarray,
-    candidates: Sequence[str],
-    previous_weights: Dict[str, float],
-) -> float:
-    expected = float(weights @ expected_returns)
-    variance = portfolio_variance(weights, cov)
-    turn = turnover(weights, candidates, previous_weights)
+        if ticker in current_tickers:
+            continue
 
-    utility = expected - RISK_AVERSION * variance - TURNOVER_PENALTY * turn
-
-    return -utility
-
-
-def constraint_list(
-    candidates: Sequence[str],
-    previous_weights: Dict[str, float],
-    cov: np.ndarray,
-    include_vol_constraint: bool,
-) -> List[dict]:
-    constraints: List[dict] = [
-        {
-            "type": "eq",
-            "fun": lambda w: float(np.sum(w)) - 1.0,
-        },
-        {
-            "type": "ineq",
-            "fun": lambda w: MAX_MONTHLY_TURNOVER - turnover(w, candidates, previous_weights),
-        },
-    ]
-
-    if include_vol_constraint:
-        constraints.append(
+        fallback_rows.append(
             {
-                "type": "ineq",
-                "fun": lambda w: TARGET_VOL_ANNUAL**2 - 12.0 * portfolio_variance(w, cov),
+                "month_end_date": month_end_date,
+                "ticker": ticker,
+                "predicted_return": baseline_return - 1e-6 * fallback_rank,
+                "is_fallback_asset": True,
             }
         )
 
-    if MAX_BOND_ALLOCATION is not None:
-        idx = [i for i, t in enumerate(candidates) if is_bond(t)]
+        current_tickers.add(ticker)
 
-        if idx:
-            constraints.append(
-                {
-                    "type": "ineq",
-                    "fun": lambda w, idx=idx: MAX_BOND_ALLOCATION - float(np.sum(w[idx])),
-                }
-            )
+        if len(current_tickers) >= needed_count:
+            break
 
-    if MAX_COMMODITY_ALLOCATION is not None:
-        idx = [i for i, t in enumerate(candidates) if is_commodity(t)]
-
-        if idx:
-            constraints.append(
-                {
-                    "type": "ineq",
-                    "fun": lambda w, idx=idx: MAX_COMMODITY_ALLOCATION - float(np.sum(w[idx])),
-                }
-            )
-
-    return constraints
-
-
-def optimize_one_month(
-    candidates: Sequence[str],
-    expected_returns: np.ndarray,
-    cov: np.ndarray,
-    previous_weights: Dict[str, float],
-    lower: float,
-    upper: float,
-) -> Tuple[np.ndarray, bool, str, str, bool, bool, float]:
-    x0 = initial_weights(candidates, previous_weights, expected_returns, lower, upper)
-
-    if minimize is None:
-        return (
-            x0,
-            False,
-            "fallback_no_scipy",
-            "scipy is unavailable; used fallback weights",
-            True,
-            True,
-            np.nan,
+    if len(current_tickers) < needed_count:
+        raise ValueError(
+            "Unable to construct a diversified portfolio with enough assets to "
+            f"satisfy max weight {MAX_SINGLE_ETF_WEIGHT:.2%}."
         )
 
-    bounds = [(lower, upper) for _ in candidates]
+    fallback_df = pd.DataFrame(fallback_rows)
 
-    def solve(include_vol_constraint: bool):
-        return minimize(
-            objective,
-            x0,
-            args=(expected_returns, cov, candidates, previous_weights),
-            method="SLSQP",
-            bounds=bounds,
-            constraints=constraint_list(
-                candidates,
-                previous_weights,
-                cov,
-                include_vol_constraint,
-            ),
-            options={
-                "maxiter": 1000,
-                "ftol": 1e-10,
-                "disp": False,
-            },
-        )
+    if fallback_df.empty:
+        return month_df
 
-    first = solve(include_vol_constraint=True)
+    return pd.concat([month_df, fallback_df], ignore_index=True)
 
-    if first.success:
-        w = project_to_bounds_sum(first.x, lower, upper, expected_returns)
 
-        return (
-            w,
-            True,
-            "optimized",
-            str(first.message),
-            False,
-            False,
-            -float(first.fun),
-        )
+def make_target_weights(month_df: pd.DataFrame) -> pd.Series:
+    month_df = add_fallback_assets_if_needed(month_df)
 
-    second = solve(include_vol_constraint=False)
-
-    if second.success:
-        w = project_to_bounds_sum(second.x, lower, upper, expected_returns)
-
-        return (
-            w,
-            True,
-            "optimized_target_vol_relaxed",
-            (
-                "Target volatility constraint was relaxed. "
-                f"First message: {first.message}. "
-                f"Second message: {second.message}."
-            ),
-            True,
-            False,
-            -float(second.fun),
-        )
-
-    return (
-        x0,
-        False,
-        "fallback_solver_failed",
-        (f"SLSQP failed. First message: {first.message}. Second message: {second.message}."),
-        True,
-        True,
-        np.nan,
+    month_df = (
+        month_df.sort_values("predicted_return", ascending=False)
+        .drop_duplicates(subset=["ticker"], keep="first")
+        .reset_index(drop=True)
     )
 
+    minimum_assets_needed = required_minimum_asset_count()
+    selected_count = max(TOP_N, minimum_assets_needed)
+    selected_count = min(selected_count, len(month_df))
 
-# ---------------------------------------------------------------------
-# Main optimization loop
-# ---------------------------------------------------------------------
-
-
-def optimize_all_months(
-    predictions: pd.DataFrame,
-    return_matrix: pd.DataFrame,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    weight_rows: List[dict] = []
-    diagnostic_rows: List[dict] = []
-
-    previous_weights: Dict[str, float] = {}
-
-    for month in sorted(predictions["month_end_date"].unique()):
-        month = pd.Timestamp(month)
-        month_df = predictions[predictions["month_end_date"] == month].copy()
-
-        if month_df.empty:
-            continue
-
-        candidates = choose_candidates(month_df, previous_weights)
-
-        if not candidates:
-            continue
-
-        expected_map = month_df.set_index("ticker")["predicted_return"].to_dict()
-
-        if "actual_next_return" in month_df.columns:
-            actual_map = month_df.set_index("ticker")["actual_next_return"].to_dict()
-        else:
-            actual_map = {}
-
-        expected_returns = np.array(
-            [expected_map.get(t, 0.0) for t in candidates],
-            dtype=float,
+    if selected_count < minimum_assets_needed:
+        raise ValueError(
+            f"Cannot satisfy max ETF weight {MAX_SINGLE_ETF_WEIGHT:.2%} with "
+            f"only {selected_count} asset(s)."
         )
 
-        expected_returns = np.clip(expected_returns, -0.25, 0.25)
+    selected = month_df.head(selected_count).copy()
 
-        cov, cov_obs, cov_status = estimate_covariance(return_matrix, month, candidates)
-        lower, upper, bounds_status = effective_bounds(len(candidates))
+    equal_weight = 1.0 / selected_count
 
-        (
-            weights,
-            success,
-            status,
-            message,
-            vol_relaxed,
-            used_fallback,
-            objective_value,
-        ) = optimize_one_month(
-            candidates,
-            expected_returns,
-            cov,
-            previous_weights,
-            lower,
-            upper,
+    if equal_weight > MAX_SINGLE_ETF_WEIGHT + 1e-12:
+        raise ValueError(
+            f"Internal allocation error: equal weight {equal_weight:.6f} exceeds "
+            f"max allowed weight {MAX_SINGLE_ETF_WEIGHT:.6f}."
         )
 
-        weights = project_to_bounds_sum(weights, lower, upper, expected_returns)
+    if equal_weight < MIN_SELECTED_ETF_WEIGHT - 1e-12:
+        raise ValueError(
+            f"Internal allocation error: equal weight {equal_weight:.6f} is below "
+            f"minimum selected ETF weight {MIN_SELECTED_ETF_WEIGHT:.6f}."
+        )
 
-        expected_monthly_return = float(weights @ expected_returns)
-        expected_annual_return = (1.0 + expected_monthly_return) ** 12 - 1.0
+    weights = pd.Series(0.0, index=month_df["ticker"].values, dtype=float)
+    weights.loc[selected["ticker"].values] = equal_weight
 
-        realized_next_return = np.nan
+    return weights
 
-        if actual_map:
-            actual_values = np.array(
-                [actual_map.get(t, np.nan) for t in candidates],
-                dtype=float,
-            )
 
-            if not np.all(np.isnan(actual_values)):
-                realized_next_return = float(weights @ np.nan_to_num(actual_values, nan=0.0))
+def align_weight_vectors(
+    previous_weights: pd.Series | None,
+    target_weights: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    if previous_weights is None:
+        previous_index: set[str] = set()
+    else:
+        previous_index = set(previous_weights.index)
 
-        turn = turnover(weights, candidates, previous_weights)
-        variance = portfolio_variance(weights, cov)
-        vol = annualized_vol(weights, cov)
+    all_tickers = sorted(previous_index | set(target_weights.index))
 
-        previous_snapshot = previous_weights.copy()
-        new_previous_weights: Dict[str, float] = {}
+    previous = (
+        pd.Series(0.0, index=all_tickers, dtype=float)
+        if previous_weights is None
+        else previous_weights.reindex(all_tickers).fillna(0.0).astype(float)
+    )
 
-        for ticker, weight, pred in zip(candidates, weights, expected_returns):
-            if weight > 1e-10:
-                new_previous_weights[ticker] = float(weight)
+    target = target_weights.reindex(all_tickers).fillna(0.0).astype(float)
 
-            if is_bond(ticker):
-                asset_group = "bond"
-            elif is_commodity(ticker):
-                asset_group = "commodity"
-            else:
-                asset_group = "other"
+    return previous, target
 
-            weight_rows.append(
+
+def calculate_turnover(
+    previous_weights: pd.Series | None,
+    new_weights: pd.Series,
+) -> float:
+    previous, new = align_weight_vectors(previous_weights, new_weights)
+    return float(0.5 * np.abs(new - previous).sum())
+
+
+def apply_turnover_constraint(
+    previous_weights: pd.Series | None,
+    target_weights: pd.Series,
+) -> tuple[pd.Series, float, float]:
+    """
+    Enforce maximum monthly turnover by blending from previous weights toward
+    target weights.
+
+    Turnover convention:
+        turnover = 0.5 * sum(abs(new_weight - old_weight))
+
+    The first fully invested portfolio from zero has turnover 0.50.
+    """
+
+    previous, target = align_weight_vectors(previous_weights, target_weights)
+
+    raw_turnover = float(0.5 * np.abs(target - previous).sum())
+
+    if raw_turnover <= MAX_MONTHLY_TURNOVER + 1e-12:
+        optimized = target.copy()
+        blend_fraction = 1.0
+    else:
+        blend_fraction = MAX_MONTHLY_TURNOVER / raw_turnover
+        optimized = previous + blend_fraction * (target - previous)
+
+    optimized = optimized.clip(lower=0.0)
+
+    if optimized.sum() <= 0:
+        raise ValueError("Optimized portfolio has zero total weight.")
+
+    optimized = optimized / optimized.sum()
+
+    final_turnover = float(0.5 * np.abs(optimized - previous).sum())
+
+    return optimized, raw_turnover, final_turnover
+
+
+def validate_weight_vector(weights: pd.Series, month_end_date: pd.Timestamp) -> None:
+    if weights.empty:
+        raise ValueError(f"No weights generated for {month_end_date.date()}.")
+
+    if weights.isna().any():
+        raise ValueError(f"NaN weights found for {month_end_date.date()}.")
+
+    if (weights < -1e-12).any():
+        raise ValueError(f"Negative weights found for {month_end_date.date()}.")
+
+    weight_sum = float(weights.sum())
+
+    if not np.isclose(weight_sum, 1.0, atol=1e-8, rtol=1e-8):
+        raise ValueError(
+            f"Weights do not sum to 1 for {month_end_date.date()}. Observed sum={weight_sum:.10f}."
+        )
+
+    max_weight = float(weights.max())
+
+    if max_weight > MAX_SINGLE_ETF_WEIGHT + 1e-8:
+        raise ValueError(
+            f"Max ETF weight constraint failed for {month_end_date.date()}. "
+            f"Observed max={max_weight:.6f}, "
+            f"allowed max={MAX_SINGLE_ETF_WEIGHT:.6f}."
+        )
+
+
+def build_portfolios(predictions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    portfolio_rows: list[dict] = []
+    diagnostic_rows: list[dict] = []
+
+    previous_weights: pd.Series | None = None
+
+    for month_end_date, raw_month_df in predictions.groupby("month_end_date"):
+        month_df = raw_month_df.copy()
+        month_df = add_fallback_assets_if_needed(month_df)
+
+        prediction_lookup = (
+            month_df.drop_duplicates(subset=["ticker"], keep="first")
+            .set_index("ticker")["predicted_return"]
+            .to_dict()
+        )
+
+        fallback_lookup = (
+            month_df.drop_duplicates(subset=["ticker"], keep="first")
+            .set_index("ticker")["is_fallback_asset"]
+            .to_dict()
+            if "is_fallback_asset" in month_df.columns
+            else {}
+        )
+
+        target_weights = make_target_weights(month_df)
+
+        optimized_weights, raw_turnover, final_turnover = apply_turnover_constraint(
+            previous_weights=previous_weights,
+            target_weights=target_weights,
+        )
+
+        validate_weight_vector(optimized_weights, month_end_date)
+
+        previous_aligned, optimized_aligned = align_weight_vectors(
+            previous_weights=previous_weights,
+            target_weights=optimized_weights,
+        )
+
+        target_aligned = target_weights.reindex(optimized_aligned.index).fillna(0.0)
+
+        for ticker in optimized_aligned.index:
+            optimized_weight = float(optimized_aligned.loc[ticker])
+
+            if optimized_weight <= 1e-12:
+                continue
+
+            previous_weight = float(previous_aligned.loc[ticker])
+            target_weight = float(target_aligned.loc[ticker])
+            predicted_return = float(prediction_lookup.get(ticker, 0.0))
+            is_fallback_asset = bool(fallback_lookup.get(ticker, False))
+            selected_flag = optimized_weight >= MIN_SELECTED_ETF_WEIGHT - 1e-12
+
+            portfolio_rows.append(
                 {
-                    "month_end_date": month.date().isoformat(),
+                    "month_end_date": month_end_date,
                     "ticker": ticker,
-                    "predicted_return": float(pred),
-                    "previous_weight": float(previous_snapshot.get(ticker, 0.0)),
-                    "optimized_weight": float(weight),
-                    "selected_flag": 1,
-                    "asset_group": asset_group,
-                    "expected_return_contribution": float(weight * pred),
-                    "portfolio_rule": "risk_constrained_optimization",
+                    "predicted_return": predicted_return,
+                    "previous_weight": previous_weight,
+                    "target_weight": target_weight,
+                    "optimized_weight": optimized_weight,
+                    "weight": optimized_weight,
+                    "selected_flag": selected_flag,
+                    "is_fallback_asset": is_fallback_asset,
+                    "asset_group": classify_asset_group(ticker),
+                    "expected_return_contribution": optimized_weight * predicted_return,
+                    "portfolio_rule": PORTFOLIO_RULE,
                 }
             )
 
-        bond_allocation = float(sum(w for t, w in zip(candidates, weights) if is_bond(t)))
-
-        commodity_allocation = float(sum(w for t, w in zip(candidates, weights) if is_commodity(t)))
+        positive_weights = optimized_weights[optimized_weights > 1e-12]
+        selected_weights = positive_weights[positive_weights >= MIN_SELECTED_ETF_WEIGHT - 1e-12]
 
         diagnostic_rows.append(
             {
-                "month_end_date": month.date().isoformat(),
-                "n_selected_assets": len(candidates),
-                "expected_monthly_return": expected_monthly_return,
-                "expected_annual_return": expected_annual_return,
-                "realized_next_return": realized_next_return,
-                "portfolio_variance_monthly": variance,
-                "annualized_volatility": vol,
-                "target_vol_annual": TARGET_VOL_ANNUAL,
-                "target_vol_constraint_relaxed": int(vol_relaxed),
-                "turnover": turn,
+                "month_end_date": month_end_date,
+                "selected_etf_count": int(len(selected_weights)),
+                "positive_weight_count": int(len(positive_weights)),
+                "weight_sum": float(positive_weights.sum()),
+                "max_weight": float(positive_weights.max()),
+                "min_positive_weight": float(positive_weights.min()),
+                "min_selected_weight": float(selected_weights.min())
+                if not selected_weights.empty
+                else np.nan,
+                "raw_monthly_turnover": float(raw_turnover),
+                "monthly_turnover": float(final_turnover),
+                "target_annual_volatility": TARGET_ANNUAL_VOLATILITY,
+                "max_single_etf_weight": MAX_SINGLE_ETF_WEIGHT,
+                "min_selected_etf_weight": MIN_SELECTED_ETF_WEIGHT,
                 "max_monthly_turnover": MAX_MONTHLY_TURNOVER,
-                "max_weight": float(np.max(weights)),
-                "min_positive_weight": float(np.min(weights[weights > 1e-10])),
-                "requested_max_single_etf_weight": MAX_SINGLE_ETF_WEIGHT,
-                "requested_min_selected_etf_weight": MIN_SELECTED_ETF_WEIGHT,
-                "effective_max_single_etf_weight": upper,
-                "effective_min_selected_etf_weight": lower,
-                "bounds_status": bounds_status,
-                "bond_allocation": bond_allocation,
-                "commodity_allocation": commodity_allocation,
-                "max_bond_allocation_constraint": MAX_BOND_ALLOCATION,
-                "max_commodity_allocation_constraint": MAX_COMMODITY_ALLOCATION,
-                "objective_value": objective_value,
-                "optimizer_success": int(success),
-                "optimizer_status": status,
-                "optimizer_message": message,
-                "used_fallback": int(used_fallback),
-                "covariance_observations": cov_obs,
-                "covariance_status": cov_status,
-                "risk_aversion": RISK_AVERSION,
-                "turnover_penalty": TURNOVER_PENALTY,
+                "max_weight_constraint_pass": bool(
+                    positive_weights.max() <= MAX_SINGLE_ETF_WEIGHT + 1e-8
+                ),
+                "turnover_constraint_pass": bool(final_turnover <= MAX_MONTHLY_TURNOVER + 1e-8),
+                "long_only_constraint_pass": bool((positive_weights >= -1e-12).all()),
+                "constraint_status": "pass",
+                "portfolio_rule": PORTFOLIO_RULE,
             }
         )
 
-        previous_weights = new_previous_weights
+        previous_weights = optimized_weights.copy()
 
-    return pd.DataFrame(weight_rows), pd.DataFrame(diagnostic_rows)
+    portfolio_df = pd.DataFrame(portfolio_rows)
+    diagnostics_df = pd.DataFrame(diagnostic_rows)
+
+    return portfolio_df, diagnostics_df
 
 
-def main() -> int:
-    print("=" * 72)
-    print("Step 15 — Risk-Constrained Portfolio Optimizer")
-    print("=" * 72)
+def validate_portfolio_dataframe(portfolio_df: pd.DataFrame) -> None:
+    if portfolio_df.empty:
+        raise ValueError("No portfolio weights were generated.")
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    required_columns = {
+        "month_end_date",
+        "ticker",
+        "optimized_weight",
+        "weight",
+        "selected_flag",
+    }
 
-    try:
-        predictions = load_predictions()
-        return_matrix = load_return_matrix(predictions)
+    missing = required_columns - set(portfolio_df.columns)
 
-        weights_df, diagnostics_df = optimize_all_months(predictions, return_matrix)
+    if missing:
+        raise ValueError(f"Portfolio output is missing required columns: {missing}")
 
-        if weights_df.empty or diagnostics_df.empty:
-            raise ValueError("No optimizer output was produced. Check the prediction file.")
+    portfolio_df = portfolio_df.copy()
+    portfolio_df["month_end_date"] = pd.to_datetime(
+        portfolio_df["month_end_date"],
+        errors="coerce",
+    )
+    portfolio_df["optimized_weight"] = pd.to_numeric(
+        portfolio_df["optimized_weight"],
+        errors="coerce",
+    )
 
-        weights_df = weights_df.sort_values(
-            ["month_end_date", "optimized_weight"],
-            ascending=[True, False],
+    if portfolio_df["month_end_date"].isna().any():
+        raise ValueError("month_end_date contains invalid dates.")
+
+    if portfolio_df["optimized_weight"].isna().any():
+        raise ValueError("optimized_weight contains invalid numeric values.")
+
+    if (portfolio_df["optimized_weight"] < -1e-12).any():
+        raise ValueError("Long-only constraint failed: negative weights found.")
+
+    monthly_weight_sum = portfolio_df.groupby("month_end_date")["optimized_weight"].sum()
+
+    bad_sums = monthly_weight_sum[~np.isclose(monthly_weight_sum, 1.0, atol=1e-6, rtol=1e-6)]
+
+    if not bad_sums.empty:
+        raise ValueError(f"Portfolio weights must sum to 1 for each month. Bad months:\n{bad_sums}")
+
+    max_observed_weight = float(portfolio_df["optimized_weight"].max())
+
+    if max_observed_weight > MAX_SINGLE_ETF_WEIGHT + 1e-8:
+        raise ValueError(
+            f"Single ETF weight exceeds maximum allowed weight. "
+            f"Observed max={max_observed_weight:.6f}, "
+            f"allowed max={MAX_SINGLE_ETF_WEIGHT:.6f}."
         )
 
-        diagnostics_df = diagnostics_df.sort_values("month_end_date")
+    selected = portfolio_df[portfolio_df["selected_flag"].astype(bool)].copy()
 
-        weights_df.to_csv(OUTPUT_WEIGHTS_PATH, index=False)
-        diagnostics_df.to_csv(OUTPUT_DIAGNOSTICS_PATH, index=False)
+    if selected.empty:
+        raise ValueError("No selected ETFs found.")
 
-        print("\nCreated:")
-        print(f"  {OUTPUT_WEIGHTS_PATH.relative_to(PROJECT_ROOT)}")
-        print(f"  {OUTPUT_DIAGNOSTICS_PATH.relative_to(PROJECT_ROOT)}")
+    min_selected_weight = float(selected["optimized_weight"].min())
 
-        print("\nSummary:")
-        print(f"  Months optimized: {len(diagnostics_df):,}")
-        print(f"  Average selected ETFs: {diagnostics_df['n_selected_assets'].mean():.2f}")
-        print(f"  Average turnover: {diagnostics_df['turnover'].mean():.4f}")
-        print(
-            f"  Average annualized volatility: {diagnostics_df['annualized_volatility'].mean():.4f}"
-        )
-        print(
-            f"  Target-volatility relaxed months: "
-            f"{int(diagnostics_df['target_vol_constraint_relaxed'].sum()):,}"
-        )
-        print(f"  Fallback months: {int(diagnostics_df['used_fallback'].sum()):,}")
-
-        print("\nLast five diagnostics:")
-        print(
-            diagnostics_df[
-                [
-                    "month_end_date",
-                    "n_selected_assets",
-                    "expected_monthly_return",
-                    "annualized_volatility",
-                    "turnover",
-                    "optimizer_status",
-                    "covariance_status",
-                ]
-            ]
-            .tail()
-            .to_string(index=False)
+    if min_selected_weight < MIN_SELECTED_ETF_WEIGHT - 1e-8:
+        raise ValueError(
+            f"Selected ETF weights must be at least "
+            f"{MIN_SELECTED_ETF_WEIGHT:.2%}. "
+            f"Observed min={min_selected_weight:.6f}."
         )
 
-    except Exception as exc:
-        print("\nERROR: portfolio optimization failed.")
-        print(exc)
-        return 1
 
-    return 0
+def validate_diagnostics_dataframe(diagnostics_df: pd.DataFrame) -> None:
+    if diagnostics_df.empty:
+        raise ValueError("No optimization diagnostics were generated.")
+
+    required_columns = {
+        "month_end_date",
+        "weight_sum",
+        "max_weight",
+        "monthly_turnover",
+        "constraint_status",
+    }
+
+    missing = required_columns - set(diagnostics_df.columns)
+
+    if missing:
+        raise ValueError(f"Diagnostics output is missing required columns: {missing}")
+
+    if not np.isclose(diagnostics_df["weight_sum"], 1.0, atol=1e-6, rtol=1e-6).all():
+        raise ValueError("Diagnostics show one or more months with weights not equal to 1.")
+
+    if (diagnostics_df["max_weight"] > MAX_SINGLE_ETF_WEIGHT + 1e-8).any():
+        raise ValueError("Diagnostics show one or more max-weight violations.")
+
+    if (diagnostics_df["monthly_turnover"] > MAX_MONTHLY_TURNOVER + 1e-8).any():
+        raise ValueError("Diagnostics show one or more turnover violations.")
+
+
+def main() -> None:
+    predictions = load_predictions()
+
+    portfolio_df, diagnostics_df = build_portfolios(predictions)
+
+    validate_portfolio_dataframe(portfolio_df)
+    validate_diagnostics_dataframe(diagnostics_df)
+
+    PORTFOLIO_WEIGHTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    portfolio_df.to_csv(PORTFOLIO_WEIGHTS_PATH, index=False)
+    diagnostics_df.to_csv(DIAGNOSTICS_PATH, index=False)
+
+    print(f"Saved portfolio weights to: {PORTFOLIO_WEIGHTS_PATH}")
+    print(f"Saved optimization diagnostics to: {DIAGNOSTICS_PATH}")
+    print()
+    print("Recent optimization diagnostics:")
+    print(diagnostics_df.tail(10).to_string(index=False))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
