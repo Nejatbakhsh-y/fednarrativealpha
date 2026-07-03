@@ -1,0 +1,42 @@
+hypothesis_id: H001
+title: Macro-narrative shifts contain incremental alpha for ETF allocation
+research_question: >
+  Do embeddings and sentiment features extracted from Federal Reserve communications
+  improve next-month ETF return ranking after controlling for momentum, volatility,
+  yield-curve, inflation, unemployment, credit spread, and market volatility features?
+
+prediction_target: next_month_cross_sectional_return_rank
+
+economic_logic: >
+  Federal Reserve communications may contain information about policy uncertainty,
+  growth risk, inflation persistence, and financial conditions. These narratives may
+  affect relative performance across equities, bonds, commodities, real estate, gold,
+  and dollar-sensitive assets.
+
+feature_groups:
+  - price_momentum
+  - realized_volatility
+  - macro_conditions
+  - yield_curve
+  - credit_spreads
+  - fed_text_embeddings
+  - fed_text_similarity_shifts
+
+validation_design:
+  method: walk_forward_validation
+  train_window_months: 60
+  test_window_months: 1
+  embargo_days: 5
+
+success_criteria:
+  - higher_information_coefficient_than_baseline
+  - higher_out_of_sample_sharpe_than_equal_weight
+  - positive_net_return_after_transaction_costs
+  - lower_drawdown_than_unconstrained_model
+  - stable_feature_importance_across_periods
+
+failure_conditions:
+  - performance disappears after transaction costs
+  - performance only appears in one market regime
+  - text features add no incremental value
+  - model turnover is economically unrealistic
