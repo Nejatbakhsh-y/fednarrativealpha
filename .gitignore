@@ -115,3 +115,5 @@ Thumbs.db
 # VS Code local settings
 # ============================================================
 .vscode/settings.local.json
+# Generated backtest and portfolio result files
+results/*.csv
