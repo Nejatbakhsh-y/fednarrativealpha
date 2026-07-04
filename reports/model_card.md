@@ -1,7 +1,7 @@
 # Model Card
 
 **Project:** FedNarrativeAlpha: GenAI-Assisted Alpha Research Pipeline for Liquid ETF Markets
-**Generated:** 2026-07-03 15:04:25
+**Generated:** 2026-07-03 19:06:41
 **Script:** `src/reporting/make_research_report.py`
 
 ---
