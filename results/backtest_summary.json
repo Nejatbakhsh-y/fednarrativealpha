@@ -1,0 +1,16 @@
+{
+  "annualized_return": -0.26991572776181194,
+  "annualized_volatility": 2.9899892356572524,
+  "sharpe_ratio": -0.09027314364310067,
+  "sortino_ratio": -0.12929724110352742,
+  "max_drawdown": -1.1275101860772772,
+  "calmar_ratio": -0.23939094395313293,
+  "hit_rate": 0.6763285024154589,
+  "best_month": 2.5852381100286483,
+  "worst_month": -2.821941931364825,
+  "number_of_months": 414,
+  "transaction_cost_drag": 10.370666666666647,
+  "source_file": "results/backtest_results.csv",
+  "date_column": "month_end_date",
+  "return_column": "net_return"
+}
