@@ -1,99 +1,216 @@
-# FedNarrativeAlpha
+# FedNarrativeAlpha: GenAI-Assisted Alpha Research Pipeline for Liquid ETF Markets
 
-FedNarrativeAlpha is a reproducible alpha-research pipeline for liquid ETF markets.
+FedNarrativeAlpha is a reproducible quantitative research project that tests whether Federal Reserve communication, macroeconomic indicators, and ETF market behavior can be combined into useful alpha signals for liquid ETF markets.
 
-The project tests whether macroeconomic indicators and Federal Reserve narrative embeddings improve next-month ETF allocation under realistic walk-forward validation, transaction costs, and risk constraints.
+The project is designed as a full research pipeline rather than a simple prediction exercise. It connects data ingestion, feature engineering, information-theoretic signal selection, walk-forward validation, transaction-cost-aware backtesting, risk-constrained portfolio construction, model-risk controls, and reproducible reporting.
 
-The system follows a full research chain:
+## Project Objective
 
-```text
-data → hypothesis → feature construction → model → validation → backtest → risk optimization → reproducible report
-```
+The objective is to evaluate whether Federal Reserve narrative information adds incremental out-of-sample value beyond price and macroeconomic features when allocating across liquid ETFs.
 
-## Project Purpose
+The central research question is:
 
-This is a research and model-validation project. Results are evaluated out-of-sample and after transaction-cost assumptions. The project is not investment advice.
+> Do Federal Reserve communication features improve next-month ETF allocation performance after realistic validation, transaction costs, and portfolio constraints?
 
-The goal is not to claim that the model predicts the stock market. Instead, the project demonstrates how to design, validate, and report a quantitative research pipeline using proper controls for financial time-series modeling.
+The project emphasizes disciplined research design. The final Sharpe ratio is not the only measure of success. The main goal is to show whether a proposed signal survives realistic out-of-sample testing.
 
-## Research Question
+## Research Workflow
 
-Does adding Federal Reserve narrative information to price and macroeconomic features improve next-month ETF allocation performance after realistic validation, transaction costs, and portfolio constraints?
-
-## Core Hypothesis
-
-Federal Reserve communications may contain information about inflation, growth, interest rates, liquidity, and macroeconomic uncertainty. Sentence-transformer embeddings are used to convert Federal Reserve text into numerical features, which are then tested against non-text baselines.
-
-The main model comparison is:
+The project follows this research chain:
 
 ```text
-price features
-vs.
-price + macro features
-vs.
-price + macro + Federal Reserve narrative features
+data
+-> hypothesis
+-> feature construction
+-> information-theoretic signal selection
+-> model training
+-> walk-forward validation
+-> portfolio signal construction
+-> transaction-cost-aware backtesting
+-> portfolio optimization
+-> reporting
+-> model-risk documentation
 ```
 
-## Pipeline Overview
+## Core Components
 
-The project is structured as a complete quantitative research workflow:
+### 1. Data Ingestion
 
-1. Download ETF price data.
-2. Download macroeconomic data from FRED.
-3. Build monthly price and macro features.
-4. Create next-month ETF return targets.
-5. Add Federal Reserve narrative embeddings.
-6. Train baseline and machine-learning models.
-7. Use walk-forward validation.
-8. Convert predictions into ETF allocation signals.
-9. Apply transaction-cost assumptions.
-10. Run portfolio backtests.
-11. Apply risk-constrained optimization.
-12. Generate reproducible research reports and model documentation.
+The project uses public market and macroeconomic data sources, including:
 
-## Validation Design
+* Liquid ETF price data
+* FRED macroeconomic indicators
+* Federal Reserve communication text, such as FOMC statements
 
-The project uses walk-forward validation instead of random train-test splitting.
+Raw data are not committed to the repository. The project is structured so that data can be regenerated through reproducible scripts.
 
-This is important because financial time-series modeling must preserve chronological order. Training data must always precede test data, and all features must be available before the prediction date.
+### 2. Feature Engineering
 
-The validation design is intended to reduce:
+The project builds monthly modeling features from:
 
-* Look-ahead bias
-* Data leakage
-* Overfitting from random splits
-* Unrealistic backtest assumptions
+* ETF price and return history
+* Momentum and volatility indicators
+* Macro indicators
+* Macro changes and lagged macro variables
+* Federal Reserve text embeddings and narrative features
 
-## Backtest Design
+The target variable is next-month ETF return.
 
-The backtest evaluates ETF allocation rules using predicted next-month returns. The portfolio construction layer converts model predictions into ETF weights and then applies transaction-cost assumptions.
+### 3. Hypothesis Registration
 
-The project compares the full narrative-enhanced model against simpler benchmarks, including:
+The project includes a hypothesis-driven research structure. Instead of blindly fitting models, the workflow documents the expected relationship between feature groups and future ETF returns.
 
-* SPY benchmark
-* 60/40 portfolio
-* Equal-weight ETF universe
-* Momentum-only strategy
-* Macro-only strategy
-* Price + macro model
-* Price + macro + Federal Reserve text model
+This helps separate genuine research logic from post-hoc model selection.
 
-## Risk Controls
+### 4. Information-Theoretic Signal Selection
 
-The portfolio optimization layer supports practical constraints such as:
+The project uses information-theoretic feature selection to identify features with potential predictive content while reducing redundancy.
+
+The feature-selection layer is designed to evaluate:
+
+* Mutual information with the target
+* Redundancy across predictors
+* Stability of selected signals
+* Incremental value of Fed narrative features
+
+### 5. Machine Learning Models
+
+The project compares several model families, including:
+
+* Baseline models
+* Ridge regression
+* Elastic Net
+* Random Forest
+* Gradient Boosting
+* XGBoost
+* LightGBM
+
+The models are evaluated across multiple feature sets:
+
+* Price features only
+* Price plus macro features
+* Price plus macro plus Fed text features
+* Information-theoretically selected features
+
+This comparison is central to the project because it tests whether the GenAI/text layer adds incremental value beyond simpler alternatives.
+
+### 6. Walk-Forward Validation
+
+The project uses chronological walk-forward validation rather than random train-test splits.
+
+The validation design includes:
+
+* Rolling or expanding training windows
+* One-month-ahead test periods
+* Chronological train/test separation
+* Feature-date integrity checks
+* No-lookahead controls
+
+This is essential for financial time-series research because random splits can create misleading results and data leakage.
+
+### 7. Portfolio Signal Construction
+
+Model predictions are converted into implementable portfolio signals.
+
+The basic portfolio rule is:
+
+* Rank ETFs by predicted next-month return
+* Select the top-ranked ETFs
+* Allocate equal weights or optimized weights
+* Rebalance monthly
+
+The project stores portfolio weights for inspection and reproducibility.
+
+### 8. Transaction-Cost-Aware Backtesting
+
+The backtest includes realistic transaction-cost assumptions.
+
+The project evaluates multiple cost scenarios:
+
+* Low cost: 5 basis points per one-way trade
+* Medium cost: 10 basis points per one-way trade
+* High cost: 25 basis points per one-way trade
+
+The backtest separates:
+
+* Gross returns
+* Turnover
+* Transaction costs
+* Net returns
+* Transaction-cost drag
+
+This helps determine whether a signal remains useful after trading costs.
+
+### 9. Risk-Constrained Portfolio Optimization
+
+The project includes portfolio optimization with practical constraints, such as:
 
 * Long-only weights
-* Maximum single-ETF allocation
-* Minimum selected-ETF allocation
-* Turnover limits
-* Target volatility controls
+* Maximum single-ETF exposure
+* Minimum selected ETF weight
+* Maximum turnover
+* Target volatility
 * Optional asset-class exposure limits
 
-These controls make the research process closer to realistic portfolio construction and model-validation practice.
+The objective is to connect model forecasts to realistic portfolio construction.
+
+### 10. Model-Risk Controls
+
+The project includes tests and documentation for model-risk control.
+
+Examples include:
+
+* No feature date can be later than the prediction date
+* Walk-forward training dates must precede test dates
+* Portfolio weights must sum to one
+* ETF weights must satisfy maximum allocation limits
+* Transaction costs must reduce gross returns
+* Backtest accounting must be internally consistent
+
+These controls help make the project credible as a research system.
+
+## Expected Repository Structure
+
+```text
+fednarrativealpha/
+├── data/
+│   ├── raw/
+│   ├── interim/
+│   └── processed/
+├── docs/
+│   └── edgestream_positioning.md
+├── notebooks/
+├── reports/
+│   ├── final_research_report.md
+│   ├── model_card.md
+│   └── figures/
+├── results/
+│   ├── selected_features.csv
+│   ├── walk_forward_predictions.csv
+│   ├── model_metrics.json
+│   ├── feature_importance.csv
+│   ├── portfolio_weights.csv
+│   ├── optimization_diagnostics.csv
+│   ├── backtest_results.csv
+│   └── backtest_summary.json
+├── scripts/
+├── src/
+│   ├── backtest/
+│   ├── data/
+│   ├── features/
+│   ├── models/
+│   └── reporting/
+├── tests/
+├── .env.example
+├── .gitignore
+├── pyproject.toml
+├── README.md
+└── requirements.txt
+```
 
 ## Expected Outputs
 
-The repository is designed to produce the following main outputs:
+A complete run of the project should produce the following research outputs:
 
 ```text
 data/processed/master_modeling_dataset.parquet
@@ -102,6 +219,7 @@ results/walk_forward_predictions.csv
 results/model_metrics.json
 results/feature_importance.csv
 results/portfolio_weights.csv
+results/optimization_diagnostics.csv
 results/backtest_results.csv
 results/backtest_summary.json
 reports/final_research_report.md
@@ -113,136 +231,95 @@ reports/figures/walk_forward_rank_ic.png
 reports/figures/portfolio_weights_over_time.png
 ```
 
-## Repository Structure
-
-```text
-FedNarrativeAlpha/
-│
-├── data/
-│   ├── raw/
-│   ├── interim/
-│   └── processed/
-│
-├── results/
-│
-├── reports/
-│   └── figures/
-│
-├── src/
-│   ├── data/
-│   ├── features/
-│   ├── models/
-│   ├── backtest/
-│   └── reporting/
-│
-├── tests/
-│
-├── README.md
-├── requirements.txt
-└── .gitignore
-```
-
-## Main Modules
-
-### `src/data/`
-
-Data ingestion and cleaning.
-
-### `src/features/`
-
-Price, macroeconomic, and Federal Reserve text-feature construction.
-
-### `src/models/`
-
-Baseline models, machine-learning models, feature selection, and walk-forward validation.
-
-### `src/backtest/`
-
-Signal conversion, transaction costs, portfolio optimization, and backtest performance metrics.
-
-### `src/reporting/`
-
-Reproducible research report and model-card generation.
-
-### `tests/`
-
-Validation tests for no-lookahead controls, feature dates, portfolio constraints, and backtest accounting.
-
 ## How to Run
 
-Install dependencies:
+From the project root, install the required packages:
 
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
-Run the machine-learning models:
+Then run the main pipeline scripts in sequence.
 
-```bash
-python src/models/train_ml_models.py
+```powershell
+python src\data\download_market_data.py
+python src\data\download_macro_data.py
+python src\features\build_price_macro_features.py
+python src\features\build_targets.py
+python src\features\select_information_features.py
+python src\models\train_baselines.py
+python src\models\train_ml_models.py
+python src\models\walk_forward_validation.py
+python src\backtest\signal_to_portfolio.py
+python src\backtest\transaction_costs.py
+python src\backtest\portfolio_optimizer.py
+python src\backtest\backtest_engine.py
+python src\reporting\make_research_report.py
 ```
 
-Run walk-forward validation:
+Then run the test suite:
 
-```bash
-python src/models/walk_forward_validation.py
-```
-
-Convert predictions into portfolio signals:
-
-```bash
-python src/backtest/signal_to_portfolio.py
-```
-
-Apply transaction costs:
-
-```bash
-python src/backtest/transaction_costs.py
-```
-
-Run the backtest engine:
-
-```bash
-python src/backtest/backtest_engine.py
-```
-
-Generate the final research report:
-
-```bash
-python src/reporting/make_research_report.py
-```
-
-Run validation tests:
-
-```bash
+```powershell
 pytest
 ```
 
-## Important Limitations
+## Validation Philosophy
 
-This project does not claim to predict the stock market.
+This project is intentionally conservative about model evaluation.
 
-This project does not guarantee profitable trading.
+It avoids relying on in-sample performance. Instead, it emphasizes:
 
-This project is not an investment strategy.
+* Chronological validation
+* Out-of-sample prediction
+* Benchmark comparison
+* Transaction-cost realism
+* Portfolio constraints
+* No-lookahead testing
+* Transparent reporting of limitations
 
-This project is not investment advice.
+The goal is not to present an overfit trading strategy. The goal is to demonstrate a rigorous research process for testing whether a market signal is robust.
 
-The purpose is to demonstrate a disciplined research process for testing whether macroeconomic indicators and Federal Reserve narrative features add measurable value under realistic validation and portfolio-construction assumptions.
+## Why This Project Is Relevant to Edgestream
 
-## Model Governance Notes
+This project is designed to demonstrate rigorous quantitative research engineering: hypothesis-driven alpha research, time-series validation, information-theoretic feature selection, transaction-cost-aware backtesting, portfolio construction, model-risk controls, and reproducible reporting.
 
-The project includes model-risk and research-governance controls such as:
+The main value is not whether the final Sharpe ratio is high. The main value is that the repository shows a complete research process for testing whether a signal survives realistic out-of-sample evaluation.
 
-* Out-of-sample validation
-* Chronological train/test separation
-* No-lookahead checks
-* Transaction-cost assumptions
-* Benchmark comparisons
-* Model-card documentation
-* Reproducible reporting
-* Explicit limitations and failure cases
+See: [Why FedNarrativeAlpha Is Strong for Edgestream](docs/edgestream_positioning.md)
+
+## Key Skills Demonstrated
+
+This repository demonstrates:
+
+* Quantitative research design
+* Alpha signal testing
+* Financial time-series validation
+* Machine learning for noisy market data
+* Information-theoretic feature selection
+* Portfolio construction
+* Transaction-cost-aware backtesting
+* Risk-constrained optimization
+* Reproducible Python engineering
+* Model validation and governance documentation
+* GenAI-assisted research workflow design
+* Clear research communication
+
+## Limitations
+
+This project is for research and portfolio demonstration purposes only.
+
+Important limitations include:
+
+* Public data may be revised, delayed, or incomplete
+* ETF returns are noisy and difficult to predict
+* Backtest results may not generalize to live trading
+* Transaction-cost assumptions are simplified
+* Model performance may be regime-dependent
+* Federal Reserve text features may not provide a stable incremental signal
+* The project does not represent a production trading system
 
 ## Disclaimer
 
-This repository is for educational, research, and model-validation purposes only. Nothing in this repository should be interpreted as financial advice, investment advice, or a recommendation to buy or sell any security.
+This repository is not investment advice. It is a research and engineering project designed to demonstrate quantitative research methodology, reproducible modeling, backtesting discipline, and model-risk documentation.
+
+No results in this repository should be interpreted as a recommendation to buy, sell, or trade any financial instrument.
